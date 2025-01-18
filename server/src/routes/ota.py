@@ -2,6 +2,7 @@ from fastapi import APIRouter, Request, Header
 from typing import Optional
 from models.mqtt import MQTTConfig
 from models.device import DeviceInfo
+from config import MQTT_HOST, MQTT_USER, MQTT_PASSWORD
 
 router = APIRouter()
 
@@ -75,18 +76,21 @@ async def check_version(
     # 创建MQTT配置
     # 这里可以根据设备信息来生成对应的配置
     mqtt_config = MQTTConfig(
+        endpoint=MQTT_HOST,  # MQTT服务器地址
         client_id=f"esp32_{device_info.mac_address}",  # 使用MAC地址作为客户端ID
+        username=MQTT_USER,  # MQTT用户名
+        password=MQTT_PASSWORD,  # MQTT密码
         subscribe_topic=f"esp32/device/{device_info.mac_address}/in",  # 设备特定的主题
-        publish_topic=f"esp32/device/{device_info.mac_address}/out"
+        publish_topic=f"esp32/device/{device_info.mac_address}/out"  # 设备特定的主题
     )
     
     # 检查版本并返回固件信息
     current_version = device_info.application.version
-    latest_version = "1.0.0"  # 这里应该从配置或数据库中获取
+    latest_version = "0.9.9"  # 固定版本号
     firmware_url = "http://example.com/firmware.bin"  # 这里应该是实际的固件URL
     
     return {
-        "mqtt": mqtt_config.dict(),
+        "mqtt": mqtt_config.model_dump(),
         "firmware": {
             "version": latest_version,
             "url": firmware_url

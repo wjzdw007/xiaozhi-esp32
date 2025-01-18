@@ -1,5 +1,10 @@
 import socket
 import netifaces
+import os
+from dotenv import load_dotenv
+
+# 加载环境变量
+load_dotenv()
 
 def get_local_ip():
     """获取本机内网IP地址"""
@@ -27,5 +32,7 @@ def get_local_ip():
 
 # 全局配置
 MQTT_HOST = get_local_ip()
+MQTT_USER = os.getenv("MQTT_USER", "mqtt_user")
+MQTT_PASSWORD = os.getenv("MQTT_PASSWORD", "mac8688965")  # 默认密码，建议通过环境变量设置
 FIRMWARE_VERSION = "1.0.0"
 FIRMWARE_URL = "http://example.com/firmware.bin" 

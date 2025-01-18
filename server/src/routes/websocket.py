@@ -76,9 +76,9 @@ async def websocket_endpoint(websocket: WebSocket):
                     # 在这里处理不同类型的文本消息
                     
                 elif "bytes" in message:
-                    # 处理二进制音频数据
+                    # 处理二进制音频数据并直接返回
                     audio_data = message["bytes"]
-                    # 在这里处理音频数据
+                    await websocket.send_bytes(audio_data)
                     
             except WebSocketDisconnect:
                 break
