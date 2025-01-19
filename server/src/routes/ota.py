@@ -6,7 +6,7 @@ from config import MQTT_HOST, MQTT_USER, MQTT_PASSWORD
 
 router = APIRouter()
 
-@router.post("/check_version")
+@router.post("/")
 async def check_version(
     request: Request,
     device_id: Optional[str] = Header(None, alias="Device-Id")
@@ -80,8 +80,8 @@ async def check_version(
         client_id=f"esp32_{device_info.mac_address}",  # 使用MAC地址作为客户端ID
         username=MQTT_USER,  # MQTT用户名
         password=MQTT_PASSWORD,  # MQTT密码
-        subscribe_topic=f"esp32/device/{device_info.mac_address}/in",  # 设备特定的主题
-        publish_topic=f"esp32/device/{device_info.mac_address}/out"  # 设备特定的主题
+        subscribe_topic=f"esp32/device/{device_info.mac_address}/out",  # 设备接收的主题
+        publish_topic=f"esp32/device/{device_info.mac_address}/in"  # 设备发送的主题
     )
     
     # 检查版本并返回固件信息

@@ -3,11 +3,19 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from routes import ota, websocket, mqtt
 from services.udp_server import UDPServer
+from config import SERVER_HOST, SERVER_PORT, UDP_PORT
 import asyncio
 import logging
 
+# 配置根日志记录器
+logging.basicConfig(
+    level=logging.DEBUG,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    force=False  # 不覆盖已存在的日志配置
+)
+
 # 创建UDP服务器实例
-udp_server = UDPServer("0.0.0.0", 8888)
+udp_server = UDPServer("0.0.0.0", UDP_PORT)
 # 设置MQTT处理器的UDP服务器
 mqtt.set_udp_server(udp_server)
 
@@ -49,4 +57,10 @@ async def root():
 if __name__ == "__main__":
     import uvicorn
     logging.basicConfig(level=logging.INFO)
-    uvicorn.run(app, host="0.0.0.0", port=8000) 
+    uvicorn.run(
+        app, 
+        host=SERVER_HOST, 
+        port=SERVER_PORT,
+        log_level="info",
+        access_log=True
+    ) 

@@ -22,17 +22,23 @@ def get_local_ip():
             if netifaces.AF_INET in addrs:
                 for addr in addrs[netifaces.AF_INET]:
                     ip = addr['addr']
-                    # 跳过回环地址
-                    if not ip.startswith('127.'):
+                    # 跳过回环地址和docker地址
+                    if not ip.startswith('127.') and not ip.startswith('172.'):
                         return ip
-        return "127.0.0.1"
+        return "0.0.0.0"  # 如果找不到合适的IP，返回0.0.0.0
     except Exception as e:
         print(f"Error getting local IP: {e}")
-        return "127.0.0.1"
+        return "0.0.0.0"
 
 # 全局配置
 MQTT_HOST = get_local_ip()
+MQTT_PORT = 1883  # 添加MQTT端口配置
 MQTT_USER = os.getenv("MQTT_USER", "mqtt_user")
 MQTT_PASSWORD = os.getenv("MQTT_PASSWORD", "mac8688965")  # 默认密码，建议通过环境变量设置
 FIRMWARE_VERSION = "1.0.0"
-FIRMWARE_URL = "http://example.com/firmware.bin" 
+FIRMWARE_URL = "http://example.com/firmware.bin"
+
+# 服务器配置
+SERVER_HOST = "0.0.0.0"  # 监听所有网络接口
+SERVER_PORT = 8000  # HTTP服务端口
+UDP_PORT = 8888    # UDP服务端口 
