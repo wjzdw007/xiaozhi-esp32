@@ -31,14 +31,15 @@ def get_local_ip():
         return "0.0.0.0"
 
 # 全局配置
-MQTT_HOST = get_local_ip()
-MQTT_PORT = 1883  # 添加MQTT端口配置
-MQTT_USER = os.getenv("MQTT_USER", "mqtt_user")
-MQTT_PASSWORD = os.getenv("MQTT_PASSWORD", "mac8688965")  # 默认密码，建议通过环境变量设置
-FIRMWARE_VERSION = "1.0.0"
-FIRMWARE_URL = "http://example.com/firmware.bin"
+MQTT_HOST = get_local_ip()  # 使用本机IP
+MQTT_PORT = 1883
+MQTT_USER = os.getenv("MQTT_USER", "xiaozhi")
+MQTT_PASSWORD = os.getenv("MQTT_PASSWORD", "mac8688965")
 
 # 服务器配置
 SERVER_HOST = "0.0.0.0"  # 监听所有网络接口
 SERVER_PORT = 8000  # HTTP服务端口
-UDP_PORT = 8888    # UDP服务端口 
+UDP_PORT = 8888    # UDP服务端口
+
+FIRMWARE_VERSION = "1.0.0"
+FIRMWARE_URL = "http://example.com/firmware.bin" 

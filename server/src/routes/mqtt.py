@@ -4,7 +4,7 @@ import json
 import logging
 from typing import Dict, Optional
 import secrets
-from datetime import datetime
+from datetime import datetime, timezone
 from aiomqtt import Client, Message
 from config import MQTT_HOST, MQTT_PORT, MQTT_USER, MQTT_PASSWORD
 
@@ -172,12 +172,12 @@ class MQTTHandler:
             key = secrets.token_hex(16)  # 128位AES密钥
             
             # 生成nonce，确保第一个字节为0x01
-            nonce_bytes = bytearray(8)  # 创建8字节的nonce
+            nonce_bytes = bytearray(16)  # 创建16字节的nonce
             nonce_bytes[0] = 0x01      # 设置第一个字节为音频数据包类型
             # 生成剩余的随机字节
-            random_bytes = secrets.token_bytes(7)
+            random_bytes = secrets.token_bytes(15)
             nonce_bytes[1:] = random_bytes
-            nonce = nonce_bytes.hex()  # 转换为十六进制字符串
+            nonce = nonce_bytes.hex()  # 转换为十六进制字符串用于JSON响应
             
             # 创建响应消息
             response = {
@@ -187,7 +187,7 @@ class MQTTHandler:
                 "version": 3,
                 "audio_params": {
                     "format": "opus",
-                    "sample_rate": 16000,
+                    "sample_rate": 24000,
                     "channels": 1,
                     "frame_duration": payload.get("audio_params", {}).get("frame_duration", 60)
                 },
@@ -195,7 +195,7 @@ class MQTTHandler:
                     "server": MQTT_HOST,
                     "port": 8888,
                     "key": key,
-                    "nonce": nonce,
+                    "nonce": nonce,  # 使用十六进制字符串
                     "encryption": "aes-128-ctr"
                 }
             }
@@ -203,16 +203,19 @@ class MQTTHandler:
             # 存储会话信息
             active_sessions[session_id] = {
                 "device_id": device_id,
-                "created_at": datetime.utcnow(),
+                "created_at": datetime.now(timezone.utc),
                 "udp_info": response["udp"],
                 "iot_descriptors": None,  # 初始化IoT描述符
                 "iot_states": None,       # 初始化IoT状态
             }
             
-            # 在UDP服务器中注册会话
+            # 在UDP服务器中注册会话，传递原始字节
             if udp_server:
-                udp_server.add_session(session_id, key, nonce)
-            
+                udp_server.add_session(session_id, key, nonce, device_id)  # 使用十六进制字符串格式的key和nonce
+                # 打印nonce，nonce_bytes
+                logger.info(f"Registered session {session_id} with nonce: {nonce}")
+                logger.info(f"Registered session {session_id} with nonce_bytes: {nonce_bytes.hex()}")
+
             # 发送响应，使用 QoS 2
             if self.client and self.connected:
                 await self.client.publish(
@@ -336,6 +339,11 @@ class MQTTHandler:
             await self.client.__aexit__(None, None, None)
             self.connected = False
             self.client = None
+
+    async def publish(self, topic: str, payload: str, qos: int = 0):
+        """发布MQTT消息"""
+        if self.client and self.connected:
+            await self.client.publish(topic, payload=payload, qos=qos)
 
 # 创建全局MQTT处理器实例
 mqtt_handler = MQTTHandler() 
