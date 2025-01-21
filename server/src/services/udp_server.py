@@ -13,15 +13,15 @@ import sys
 
 # 配置UDP服务器的日志
 logger = logging.getLogger("udp_server")
-logger.setLevel(logging.DEBUG)
+logger.setLevel(logging.INFO)
 
 # 创建控制台处理器
 console_handler = logging.StreamHandler(sys.stdout)  # 指定输出到标准输出
-console_handler.setLevel(logging.DEBUG)
+console_handler.setLevel(logging.INFO)
 
 # 创建文件处理器
 file_handler = logging.FileHandler('logs/udp_server.log', encoding='utf-8')
-file_handler.setLevel(logging.DEBUG)
+file_handler.setLevel(logging.INFO)
 
 # 设置日志格式，添加行号信息
 formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - [%(filename)s:%(lineno)d] - %(message)s')
@@ -212,7 +212,7 @@ class UDPServerProtocol(asyncio.DatagramProtocol):
         
     def datagram_received(self, data: bytes, addr):
         try:
-            logger.info(f"收到UDP数据包 - 来源: {addr}, 大小: {len(data)} 字节")
+            logger.debug(f"收到UDP数据包 - 来源: {addr}, 大小: {len(data)} 字节")
             # 打印数据包的前16字节（如果有）用于调试
             if len(data) >= 16:
                 logger.debug(f"数据包头16字节: {data[:16].hex()}")

@@ -17,15 +17,15 @@ print("Audio player module loaded")  # 添加这行来确认模块被正确加�
 
 # 配置日志
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.DEBUG)
+logger.setLevel(logging.INFO)
 
 # 创建控制台处理器
 console_handler = logging.StreamHandler(sys.stdout)  # 指定输出到标准输出
-console_handler.setLevel(logging.DEBUG)
+console_handler.setLevel(logging.INFO)
 
 # 创建文件处理器
 file_handler = logging.FileHandler('logs/audio_player.log', encoding='utf-8')
-file_handler.setLevel(logging.DEBUG)
+file_handler.setLevel(logging.INFO)
 
 # 设置日志格式
 formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - [%(filename)s:%(lineno)d] - %(message)s')
@@ -210,86 +210,82 @@ class AudioPlayer:
             logger.warning(f"Audio callback status: {status}")
             
         try:
-            # 初始化输出数据为0
-            mixed_audio = np.zeros(frames, dtype=np.int16)
-            
             with self.buffer_lock:
                 buffer_size = len(self.audio_buffer)
-                if self.audio_buffer:
+                # 只有当缓冲区有足够的数据时才消费和输出
+                if buffer_size > 0 and len(self.audio_buffer[0]) >= frames:
                     # 从缓冲区获取音频数据
                     audio_data = self.audio_buffer.popleft()
-                    if len(audio_data) >= frames:
-                        mixed_audio = audio_data[:frames]
-                    else:
-                        # 如果数据不够，用零填充
-                        mixed_audio[:len(audio_data)] = audio_data
+                    mixed_audio = audio_data[:frames]
+                    # 只在有数据时才写入输出缓冲区
+                    outdata[:] = mixed_audio.reshape(-1, 1)
                     logger.debug(f"Playing audio frame, buffer size: {buffer_size-1}")
-            
-            # 将音频写入输出缓冲区
-            outdata[:] = mixed_audio.reshape(-1, 1)
+                else:
+                    # 没有数据时直接填充0（静音）
+                    outdata.fill(0)
+                    logger.debug(f"等待更多音频数据，当前buffer大小: {buffer_size}")
             
         except Exception as e:
             logger.error(f"Error in audio callback: {str(e)}")
             outdata.fill(0)
+
+    def vad_60ms_to_20ms_frames(self, frame_60ms, sample_rate=16000):
+        """
+        输入一帧 60ms 的 PCM 数据 (16kHz, mono, 16-bit)，
+        拆分为 3 个 20ms 子帧，每个子帧用 VAD 检测。
         
-    def process_with_vad(self, audio_array):
+        :param frame_60ms: 60ms 的 PCM 数据 (bytes)，长度应为 1920 字节
+        :param sample_rate: 采样率，默认 16kHz
+        :return: 该 60ms 帧是否包含语音（布尔值）
+        """
+        # 确保输入数据是字节格式
+        pcm_bytes = frame_60ms if isinstance(frame_60ms, bytes) else bytes(frame_60ms)
+        
+        # WebRTC VAD 仅支持 10/20/30ms 帧
+        # 对于 16kHz, 20ms = 16000 * 0.02 * 2 = 640 bytes
+        chunk_size_20ms = 640
+        results = []
+        
+        # 拆分出 3 个 20ms 子帧
+        for i in range(3):
+            start = i * chunk_size_20ms
+            end = start + chunk_size_20ms
+            if end <= len(pcm_bytes):
+                sub_frame = pcm_bytes[start:end]
+                # 调用 VAD
+                try:
+                    is_speech = self.vad.is_speech(sub_frame, sample_rate)
+                    results.append(is_speech)
+                except Exception as e:
+                    logger.error(f"VAD处理子帧时出错: {str(e)}")
+                    continue
+        
+        # 只要有一个子帧是 True，就认为 60ms 里有人声
+        return any(results) if results else False
+
+    def process_with_vad(self, audio_data):
         """使用VAD处理音频数据"""
         try:
-            # 将音频数据转换为字节
-            raw_audio = struct.pack("h" * len(audio_array), *audio_array)
+            # 将音频数据转换为numpy数组
+            audio_array = np.frombuffer(audio_data, dtype=np.int16)
             
-            # WebRTC VAD需要10ms、20ms或30ms的帧
-            frame_duration = 20  # 使用20ms帧，提高响应速度
-            frame_size = int(self.sample_rate * frame_duration / 1000)  # 每帧采样点数
-            
-            # 将音频分成20ms的帧
-            frames = [raw_audio[i:i + frame_size * 2] for i in range(0, len(raw_audio), frame_size * 2)]
-            
-            # 如果没有在说话状态，直接开始新的语音片段
-            if not self.is_speaking:
-                self.speech_frames = []
-            
-            speech_detected = False
-            
-            for frame in frames:
-                if len(frame) == frame_size * 2:  # 确保帧长度正确
-                    try:
-                        is_speech = self.vad.is_speech(frame, self.sample_rate)
-                        if is_speech:
-                            speech_detected = True
-                            self.silence_duration = 0
-                            self.is_speaking = True
-                        elif self.is_speaking:
-                            self.silence_duration += 1
-                    except Exception as e:
-                        logger.error(f"VAD处理单帧时出错: {str(e)}")
-                        continue
+            if self.vad_60ms_to_20ms_frames(audio_data):
+                logger.debug("检测到语音")
+                with self.buffer_lock:
+                    self.audio_buffer.append(audio_array)
+            else:
+                logger.debug("未检测到语音")
+                # # 即使未检测到语音，我们也将音频添加到缓冲区，以保持连续性
+                # with self.buffer_lock:
+                #     self.audio_buffer.append(audio_array)
                     
-                    # 保存当前帧的音频数据
-                    frame_samples = np.frombuffer(frame, dtype=np.int16)
-                    self.speech_frames.extend(frame_samples)
-            
-            # 处理语音片段结束的情况
-            if self.is_speaking and (self.silence_duration >= self.SILENCE_THRESHOLD or speech_detected):
-                if len(self.speech_frames) > 0:
-                    # 将完整的语音片段添加到播放缓冲区
-                    with self.buffer_lock:
-                        self.audio_buffer.append(np.array(self.speech_frames))
-                        logger.debug(f"Added speech segment to buffer, length: {len(self.speech_frames)}")
-                    
-                    # 重置状态
-                    self.speech_frames = []
-                    if self.silence_duration >= self.SILENCE_THRESHOLD:
-                        self.is_speaking = False
-                        self.silence_duration = 0
-                
         except Exception as e:
-            logger.error(f"Error in VAD processing: {str(e)}")
+            logger.error(f"VAD处理时出错: {str(e)}")
             logger.error(traceback.format_exc())
             # 发生错误时，直接播放原始音频
             with self.buffer_lock:
                 self.audio_buffer.append(audio_array)
-                logger.debug("Error occurred, added original audio to buffer")
+                logger.debug("错误发生，添加原始音频到缓冲区")
 
     async def play_audio(self, audio_data: bytes):
         """播放音频数据"""
@@ -311,7 +307,7 @@ class AudioPlayer:
                 return
             
             # 使用VAD处理音频
-            self.process_with_vad(audio_array)
+            self.process_with_vad(pcm_data)
             
         except Exception as e:
             logger.error(f"Error playing audio: {str(e)}")

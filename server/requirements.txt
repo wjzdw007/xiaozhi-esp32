@@ -9,11 +9,20 @@ aiomqtt>=1.2.0  # MQTT client support
 cryptography>=42.0.0  # Encryption support
 python-dotenv>=0.19.0  # Environment variables support
 sounddevice>=0.4.6  # Audio playback support
-numpy>=1.26.2  # Array processing support
+numpy<2.0.0  # Array processing support, 使用1.x版本以兼容PyTorch
 webrtcvad>=2.0.10  # Voice Activity Detection support
+
+# Speech recognition
+torch>=2.1.0  # PyTorch for Whisper
+openai-whisper>=20231117  # Whisper model
+ffmpeg-python>=0.2.0  # Required by Whisper for audio processing
 
 # Test dependencies
 pytest>=6.2.5
 httpx>=0.24.0  # Required for FastAPI TestClient
 pytest-cov>=2.12.0  # Test coverage
-pytest-asyncio>=0.15.1  # Async test support 
+pytest-asyncio>=0.15.1  # Async test support
+
+# New dependencies
+openai-whisper==20231117
+torch==2.1.0 
