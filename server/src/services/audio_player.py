@@ -6,6 +6,7 @@ import numpy as np
 import threading
 import queue
 from collections import deque
+# 这里假设你在同一项目里有 udp_server.py 模块
 from .udp_server import global_audio_queue, queue_lock
 from opuslib import Decoder
 import traceback
@@ -61,12 +62,15 @@ class AudioPlayer:
         self._monitor_task = None  # 用于存储监控任务
         
         # VAD相关初始化
-        self.vad = webrtcvad.Vad(2)  # 降低VAD灵敏度为2
-        self.vad_buffer = []  # 存储待处理的音频数据
-        self.speech_frames = []  # 存储检测到的语音帧
-        self.silence_duration = 0  # 记录静音持续时间
-        self.is_speaking = False  # 当前是否在说话
-        self.SILENCE_THRESHOLD = 15  # 降低静音阈值
+        self.vad = webrtcvad.Vad(2)  # 设置VAD灵敏度为2，可以根据需要调整(0~3)
+        
+        # === 新增/修改开始 ===
+        # 下面这些变量用来辅助做整段语音检测
+        self.speech_frames = []       # 用于累积完整说话片段（PCM）
+        self.silence_duration = 0     # 记录连续静音的计数
+        self.is_speaking = False      # 当前是否在说话
+        self.SILENCE_THRESHOLD = 15   # 连续多少帧（这里按我们处理60ms为1帧的逻辑）视为说话结束，你可以灵活调整
+        # === 新增/修改结束 ===
         
         # 创建Opus解码器
         try:
@@ -120,16 +124,16 @@ class AudioPlayer:
     @classmethod
     async def create(cls, sample_rate: int = 16000):
         """创建并初始化AudioPlayer的异步工厂方法"""
-        print("AudioPlayer.create called")  # 添加这行
+        print("AudioPlayer.create called")
         player = cls(sample_rate)
         await player.initialize()
         return player
 
     async def initialize(self):
         """异步初始化方法"""
-        print("Initializing audio player...")  # 添加这行
+        print("Initializing audio player...")
         self.start_playing()
-        print("Audio player initialized")  # 添加这行
+        print("Audio player initialized")
         logger.info("Audio player initialized and started automatically")
         
     async def _monitor_audio_queue(self):
@@ -217,7 +221,6 @@ class AudioPlayer:
                     # 从缓冲区获取音频数据
                     audio_data = self.audio_buffer.popleft()
                     mixed_audio = audio_data[:frames]
-                    # 只在有数据时才写入输出缓冲区
                     outdata[:] = mixed_audio.reshape(-1, 1)
                     logger.debug(f"Playing audio frame, buffer size: {buffer_size-1}")
                 else:
@@ -242,7 +245,7 @@ class AudioPlayer:
         pcm_bytes = frame_60ms if isinstance(frame_60ms, bytes) else bytes(frame_60ms)
         
         # WebRTC VAD 仅支持 10/20/30ms 帧
-        # 对于 16kHz, 20ms = 16000 * 0.02 * 2 = 640 bytes
+        # 对于 16kHz, 20ms = 16000 * 0.02 * 2 = 640 字节 (单声道16位)
         chunk_size_20ms = 640
         results = []
         
@@ -261,34 +264,88 @@ class AudioPlayer:
                     continue
         
         # 只要有一个子帧是 True，就认为 60ms 里有人声
-        return any(results) if results else False
+        return all(results) if results else False
 
-    def process_with_vad(self, audio_data):
-        """使用VAD处理音频数据"""
+    # === 新增/修改开始 ===
+    def handle_speech_segment(self, speech_data: bytes):
+        """
+        在说话结束时被调用，将一次完整的语音PCM数据传进来。
+        你可以在这里做语音转文字或者其他逻辑。
+
+        :param speech_data: 完整语音PCM的二进制数据（16k、16bit、单声道）
+        """
+        logger.info(f"Handling complete speech segment, size={len(speech_data)} bytes")
+        # 在这里做语音识别或其他业务逻辑
+        # 示例：speech_to_text_result = some_asr_function(speech_data, sample_rate=16000)
+        # logger.info(f"ASR result: {speech_to_text_result}")
+                # === 2. 播放整段PCM音频（同步阻塞播放）===
+        audio_array = np.frombuffer(speech_data, dtype=np.int16)
+
+        # 用 sounddevice 的简易接口直接播放
+        logger.info("开始播放刚才说的整段音频...")
+        sd.play(audio_array, samplerate=self.sample_rate)
+        sd.wait()  # 阻塞到播放完成
+        logger.info("播放结束")
+        pass
+    # === 新增/修改结束 ===
+
+    def process_with_vad(self, audio_data: bytes):
+        """使用VAD处理音频数据，并放入播放缓冲区（如有需要）"""
         try:
-            # 将音频数据转换为numpy数组
-            audio_array = np.frombuffer(audio_data, dtype=np.int16)
+            # audio_data 已经是PCM的bytes(60ms)
+            is_speech = self.vad_60ms_to_20ms_frames(audio_data)
             
-            if self.vad_60ms_to_20ms_frames(audio_data):
+            # === 新增/修改开始 ===
+            if is_speech:
                 logger.debug("检测到语音")
-                with self.buffer_lock:
-                    self.audio_buffer.append(audio_array)
+                # 如果是语音，就累积到 self.speech_frames
+                self.speech_frames.append(audio_data)
+                
+                if not self.is_speaking:
+                    self.is_speaking = True
+                    logger.debug("Start of speech detected")
+                
+                # 重置静音计数
+                self.silence_duration = 0
             else:
                 logger.debug("未检测到语音")
-                # # 即使未检测到语音，我们也将音频添加到缓冲区，以保持连续性
-                # with self.buffer_lock:
-                #     self.audio_buffer.append(audio_array)
+                if self.is_speaking:
+                    # 如果原本正在说话，那么累积静音计数
+                    self.silence_duration += 1
+                    logger.debug(f"Silence detected, silence_duration={self.silence_duration}")
+                    
+                    # 如果静音持续时间超过阈值，认为说话结束
+                    if self.silence_duration >= self.SILENCE_THRESHOLD:
+                        logger.info("End of speech detected")
+                        # 把所有累积的语音帧拼起来
+                        speech_data = b"".join(self.speech_frames)
+                        
+                        # 清空说话帧
+                        self.speech_frames.clear()
+                        self.is_speaking = False
+                        self.silence_duration = 0
+                        
+                        # 调用处理完整语音段的函数
+                        self.handle_speech_segment(speech_data)
+            # === 新增/修改结束 ===
+            
+            # 下方这段是你原先往播放队列里放的逻辑
+            # 如果你仍需要播放，保留；否则可以直接删除这段
+            # audio_array = np.frombuffer(audio_data, dtype=np.int16)
+            # with self.buffer_lock:
+            #     self.audio_buffer.append(audio_array)
                     
         except Exception as e:
             logger.error(f"VAD处理时出错: {str(e)}")
             logger.error(traceback.format_exc())
             # 发生错误时，直接播放原始音频
+            audio_array = np.frombuffer(audio_data, dtype=np.int16)
             with self.buffer_lock:
                 self.audio_buffer.append(audio_array)
                 logger.debug("错误发生，添加原始音频到缓冲区")
 
     async def play_audio(self, audio_data: bytes):
-        """播放音频数据"""
+        """播放音频数据（先解码OPUS，然后做VAD分析，再写入本地播放缓冲）"""
         if not self.is_playing:
             logger.warning("Cannot play audio: player is not started")
             return
@@ -298,15 +355,14 @@ class AudioPlayer:
             try:
                 logger.debug(f"开始解码音频数据，大小: {len(audio_data)} 字节，帧大小: {self.frame_size}")
                 pcm_data = self.decoder.decode(audio_data, self.frame_size)
-                # 将解码后的数据转换为numpy数组
-                audio_array = np.frombuffer(pcm_data, dtype=np.int16)
-                logger.debug(f"解码成功，PCM数据大小: {len(audio_array)} 采样点")
+                # pcm_data 现在是 bytes 类型，长度 = frame_size * 2 (因为16bit)
+                logger.debug(f"解码成功，PCM数据大小: {len(pcm_data)} 字节")
             except Exception as e:
                 logger.error(f"Failed to decode Opus data: {str(e)}")
                 logger.error(f"错误堆栈: {traceback.format_exc()}")
                 return
             
-            # 使用VAD处理音频
+            # 使用VAD处理音频(60ms)
             self.process_with_vad(pcm_data)
             
         except Exception as e:
@@ -323,4 +379,4 @@ class AudioPlayer:
             
     def __del__(self):
         """析构函数"""
-        self.close() 
+        self.close()
