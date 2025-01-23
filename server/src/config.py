@@ -31,15 +31,32 @@ def get_local_ip():
         return "0.0.0.0"
 
 # 全局配置
-MQTT_HOST = get_local_ip()  # 使用本机IP
+MQTT_HOST = get_local_ip()  # 使用本机IP作为MQTT服务器地址
 MQTT_PORT = 1883
 MQTT_USER = os.getenv("MQTT_USER", "xiaozhi")
 MQTT_PASSWORD = os.getenv("MQTT_PASSWORD", "mac8688965")
 
 # 服务器配置
-SERVER_HOST = "0.0.0.0"  # 监听所有网络接口
-SERVER_PORT = 8000  # HTTP服务端口
-UDP_PORT = 8888    # UDP服务端口
+SERVER_HOST = "0.0.0.0"
+SERVER_PORT = int(os.getenv("SERVER_PORT", "8000"))
 
+# UDP服务器配置
+UDP_PORT = int(os.getenv("UDP_PORT", "8888"))
+
+# WebSocket服务器配置
+WEBSOCKET_PORT = int(os.getenv("WEBSOCKET_PORT", "8765"))
+WEBSOCKET_ACCESS_TOKEN = os.getenv("WEBSOCKET_ACCESS_TOKEN", "test-token")
+
+# MQTT配置
+MQTT_BROKER = os.getenv("MQTT_BROKER", "broker.emqx.io")  # 外部MQTT服务器地址
+MQTT_USERNAME = os.getenv("MQTT_USERNAME", "")  # 外部MQTT服务器用户名
+MQTT_CLIENT_ID = os.getenv("MQTT_CLIENT_ID", "xiaozhi_server")  # MQTT客户端ID
+
+# 音频配置
+AUDIO_SAMPLE_RATE = 16000
+AUDIO_CHANNELS = 1
+AUDIO_FRAME_DURATION_MS = 20
+
+# 固件配置
 FIRMWARE_VERSION = "1.0.0"
-FIRMWARE_URL = "http://example.com/firmware.bin" 
+FIRMWARE_URL = os.getenv("FIRMWARE_URL", "http://example.com/firmware.bin") 

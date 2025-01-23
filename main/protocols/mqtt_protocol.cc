@@ -83,7 +83,7 @@ bool MqttProtocol::StartMqttClient() {
     });
 
     ESP_LOGI(TAG, "Connecting to endpoint %s", endpoint_.c_str());
-    if (!mqtt_->Connect(endpoint_, 8883, client_id_, username_, password_)) {
+    if (!mqtt_->Connect(endpoint_, 1883, client_id_, username_, password_)) {
         ESP_LOGE(TAG, "Failed to connect to endpoint");
         if (on_network_error_ != nullptr) {
             on_network_error_("无法连接服务");
@@ -125,7 +125,7 @@ void MqttProtocol::SendAudio(const std::vector<uint8_t>& data) {
         (uint8_t*)data.data(), (uint8_t*)&encrypted[nonce.size()]) != 0) {
         ESP_LOGE(TAG, "Failed to encrypt audio data");
         return;
-    }
+    }    
     udp_->Send(encrypted);
 }
 
@@ -185,7 +185,8 @@ bool MqttProtocol::OpenAudioChannel() {
     }
     udp_ = Board::GetInstance().CreateUdp();
     udp_->OnMessage([this](const std::string& data) {
-        if (data.size() < sizeof(aes_nonce_)) {
+        ESP_LOGI(TAG, "########## Received audio packet size: %zu bytes", data.size());
+        if (data.size() < aes_nonce_.size()) {
             ESP_LOGE(TAG, "Invalid audio packet size: %zu", data.size());
             return;
         }
@@ -194,6 +195,8 @@ bool MqttProtocol::OpenAudioChannel() {
             return;
         }
         uint32_t sequence = ntohl(*(uint32_t*)&data[12]);
+        ESP_LOGI(TAG, "########## Received audio packet sequence: %lu, remote_sequence_: %lu", sequence, remote_sequence_);
+
         if (sequence < remote_sequence_) {
             ESP_LOGW(TAG, "Received audio packet with old sequence: %lu, expected: %lu", sequence, remote_sequence_);
             return;
@@ -214,6 +217,7 @@ bool MqttProtocol::OpenAudioChannel() {
             ESP_LOGE(TAG, "Failed to decrypt audio data, ret: %d", ret);
             return;
         }
+        ESP_LOGI(TAG, "########## Decrypted audio data size: %zu bytes", decrypted.size());
         if (on_incoming_audio_ != nullptr) {
             on_incoming_audio_(std::move(decrypted));
         }
@@ -290,4 +294,15 @@ std::string MqttProtocol::DecodeHexString(const std::string& hex_string) {
 
 bool MqttProtocol::IsAudioChannelOpened() const {
     return udp_ != nullptr;
+}
+
+std::string MqttProtocol::EncodeHexString(const std::vector<uint8_t>& data) {
+    std::string result;
+    result.reserve(data.size() * 2);  // 预分配空间，每个字节需要2个字符
+    
+    for (uint8_t byte : data) {
+        result.push_back(hex_chars[byte >> 4]);    // 高4位
+        result.push_back(hex_chars[byte & 0x0F]);  // 低4位
+    }
+    return result;
 }

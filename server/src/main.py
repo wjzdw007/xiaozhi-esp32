@@ -3,9 +3,10 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from routes import ota, websocket, mqtt
 from routes.mqtt import mqtt_handler
+from routes.websocket import ws_manager
 from services.udp_server import UDPServer
 from services.audio_player import AudioPlayer
-from config import SERVER_HOST, SERVER_PORT, UDP_PORT
+from config import SERVER_HOST, SERVER_PORT, UDP_PORT, WEBSOCKET_ACCESS_TOKEN
 import asyncio
 import logging
 import sys
@@ -13,7 +14,7 @@ import traceback
 
 # 配置根日志记录器
 logging.basicConfig(
-    level=logging.DEBUG,
+    level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - [%(filename)s:%(lineno)d] - %(message)s',
     force=True,  # 强制覆盖已存在的日志配置
     handlers=[
@@ -39,56 +40,64 @@ def handle_exception(exc_type, exc_value, exc_traceback):
 # 设置全局异常处理器
 sys.excepthook = handle_exception
 
-# 创建UDP服务器实例
+# 创建服务器实例
 udp_server = UDPServer("0.0.0.0", UDP_PORT, mqtt_handler)
-# 创建音频播放器实例（将在lifespan中初始化）
-audio_player = None
 
 # 设置MQTT处理器的UDP服务器
 mqtt.set_udp_server(udp_server)
+
+# 设置正确的访问令牌
+ws_manager.access_token = WEBSOCKET_ACCESS_TOKEN
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # 启动时
     try:
-        print("Starting server initialization...")  # 添加打印
-        global audio_player
-        print("Connecting to MQTT...")  # 添加打印
+        print("Starting server initialization...")
+        
+        print("Connecting to MQTT...")
         await mqtt.mqtt_handler.connect()
-        print("Starting UDP server...")  # 添加打印
+        
+        print("Starting UDP server...")
         await udp_server.start()
-        print("Creating audio player...")  # 添加打印
+        
+        print("Creating audio player...")
         try:
             audio_player = await AudioPlayer.create()
+            # 设置 WebSocket 的音频播放器
+            websocket.set_audio_player(audio_player)
         except Exception as e:
-            print(f"Error creating audio player: {e}")  # 添加打印
-            print("Traceback:")  # 添加打印
-            traceback.print_exc()  # 打印堆栈跟踪
+            print(f"Error creating audio player: {e}")
+            print("Traceback:")
+            traceback.print_exc()
             raise
-        print("Setting up UDP server audio player...")  # 添加打印
+            
+        print("Setting up UDP server audio player...")
         udp_server.set_audio_player(audio_player)
-        print("Server initialization completed successfully")  # 添加打印
+        audio_player.set_udp_server(udp_server)
+        
+        print("Server initialization completed successfully")
         yield
     except Exception as e:
-        print(f"Error during server startup: {e}")  # 添加打印
-        print("Traceback:")  # 添加打印
-        traceback.print_exc()  # 打印堆栈跟踪
+        print(f"Error during server startup: {e}")
+        print("Traceback:")
+        traceback.print_exc()
         logger.error(f"Error during server startup: {str(e)}")
         logger.error("Exception details:", exc_info=True)
         raise
     finally:
         # 关闭时
         try:
-            print("Starting server shutdown...")  # 添加打印
+            print("Starting server shutdown...")
             await mqtt.mqtt_handler.disconnect()
             udp_server.stop()
             if audio_player:
                 audio_player.close()
-            print("Server shutdown completed successfully")  # 添加打印
+            print("Server shutdown completed successfully")
         except Exception as e:
-            print(f"Error during server shutdown: {e}")  # 添加打印
-            print("Traceback:")  # 添加打印
-            traceback.print_exc()  # 打印堆栈跟踪
+            print(f"Error during server shutdown: {e}")
+            print("Traceback:")
+            traceback.print_exc()
             logger.error(f"Error during server shutdown: {str(e)}")
             logger.error("Exception details:", exc_info=True)
 

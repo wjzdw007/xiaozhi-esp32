@@ -158,7 +158,9 @@ class UDPServer:
         for s in self.sessions.values():
             if s["nonce"][4:12] == nonce[4:12]:
                 session = s
-                logger.debug(f"找到匹配的会话: {s['session_id']}")
+                # 保存客户端地址
+                session["client_addr"] = addr
+                logger.debug(f"找到匹配的会话: {s['session_id']}, 客户端地址: {addr}")
                 break
                 
         if not session:
@@ -199,6 +201,57 @@ class UDPServer:
                 logger.debug(f"音频数据已添加到全局队列 - 当前队列大小: {global_audio_queue.qsize()}")
             except queue.Full:
                 logger.warning("全局音频队列已满，丢弃数据包")
+
+    def send_audio_data(self, session_id: str, audio_data: bytes):
+        """发送音频数据到指定会话的客户端
+        
+        :param session_id: 会话ID
+        :param audio_data: PCM音频数据
+        """
+        try:
+            if session_id not in self.sessions:
+                logger.warning(f"未找到会话: {session_id}")
+                return
+                
+            session = self.sessions[session_id]
+            
+            # 使用session中的nonce作为基础
+            nonce = bytearray(session["nonce"])
+            
+            # 设置数据大小（2字节）
+            data_size = len(audio_data)
+            nonce[2:4] = data_size.to_bytes(2, 'big')
+            
+            # 设置序列号（4字节）
+            sequence = session["local_sequence"] + 1
+            nonce[12:16] = sequence.to_bytes(4, 'big')
+            
+            # 使用AES-CTR模式加密音频数据
+            cipher = Cipher(
+                algorithms.AES(session["key"]),
+                modes.CTR(nonce),
+                backend=default_backend()
+            )
+            encryptor = cipher.encryptor()
+            encrypted_data = encryptor.update(audio_data) + encryptor.finalize()
+            
+            # 更新本地序列号
+            session["local_sequence"] = sequence
+            
+            # 组装完整的数据包：nonce + 加密的音频数据
+            packet = nonce + encrypted_data
+            
+            # 获取客户端地址信息
+            client_addr = session.get("client_addr")
+            if client_addr and self.transport:
+                self.transport.sendto(packet, client_addr)
+                logger.info(f"已发送音频数据到客户端 {client_addr}, 大小: {len(packet)} 字节，序列号: {sequence}")
+            else:
+                logger.warning(f"无法发送音频数据：未知的客户端地址或传输层未初始化")
+                
+        except Exception as e:
+            logger.error(f"发送音频数据失败: {str(e)}")
+            logger.error(traceback.format_exc())
 
 class UDPServerProtocol(asyncio.DatagramProtocol):
     def __init__(self, server: UDPServer):

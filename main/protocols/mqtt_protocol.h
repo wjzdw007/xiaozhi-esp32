@@ -53,6 +53,7 @@ private:
     bool StartMqttClient();
     void ParseServerHello(const cJSON* root);
     std::string DecodeHexString(const std::string& hex_string);
+    std::string EncodeHexString(const std::vector<uint8_t>& data);
 
     void SendText(const std::string& text) override;
 };

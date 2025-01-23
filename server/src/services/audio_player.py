@@ -23,6 +23,8 @@ from datetime import datetime, timedelta
 from openai import AsyncOpenAI
 from dotenv import load_dotenv
 import edge_tts  # 添加 edge-tts 导入
+import json
+from routes.mqtt import mqtt_handler
 
 # 加载环境变量
 load_dotenv()
@@ -148,6 +150,9 @@ class AudioPlayer:
         self.audio_buffer = deque(maxlen=100)  # 本地音频缓冲区
         self.buffer_lock = threading.Lock()
         self._monitor_task = None  # 用于存储监控任务
+        self.udp_server = None  # 添加UDP服务器引用
+        self.processing_lock = asyncio.Lock()  # 添加异步处理锁
+        self.ws_manager = None  # 添加 WebSocket 管理器引用
         
         # 初始化临时文件管理器
         self.temp_file_manager = TempFileManager()
@@ -169,17 +174,19 @@ class AudioPlayer:
         self.asr_model = None
         self.model_loaded = asyncio.Event()  # 用于跟踪模型加载状态
         
-        # 创建Opus解码器
+        # 创建Opus编码器和解码器
         try:
             self.frame_size = int(sample_rate * 0.06)  # 60ms
             self.channels = 1
-            print("Creating Opus decoder...")
+            print("Creating Opus encoder and decoder...")
+            from opuslib import Encoder, Decoder
+            self.encoder = Encoder(sample_rate, self.channels, 'voip')
             self.decoder = Decoder(sample_rate, self.channels)
-            print("Opus decoder created successfully")
-            logger.info(f"Created Opus decoder with frame size: {self.frame_size}")
+            print("Opus encoder and decoder created successfully")
+            logger.info(f"Created Opus encoder and decoder with frame size: {self.frame_size}")
         except Exception as e:
-            print(f"Failed to create Opus decoder: {e}")
-            logger.error(f"Failed to create Opus decoder: {str(e)}")
+            print(f"Failed to create Opus encoder/decoder: {e}")
+            logger.error(f"Failed to create Opus encoder/decoder: {str(e)}")
             raise
         
         # 打印可用的音频设备信息
@@ -416,56 +423,206 @@ class AudioPlayer:
             logger.error(traceback.format_exc())
             return ""
 
+    def set_udp_server(self, server):
+        """设置UDP服务器实例"""
+        self.udp_server = server
+        if server:
+            logger.info(f"UDP服务器已设置到音频播放器，sessions数量: {len(server.sessions)}")
+        else:
+            logger.error("尝试设置空的UDP服务器实例")
+
+    def set_ws_manager(self, manager):
+        """设置 WebSocket 管理器实例"""
+        self.ws_manager = manager
+        if manager:
+            logger.info("WebSocket 管理器已设置到音频播放器")
+        else:
+            logger.error("尝试设置空的 WebSocket 管理器实例")
+
     async def handle_speech_segment(self, speech_data: bytes):
         """
         在说话结束时被调用，处理完整的语音段
         
         :param speech_data: 完整语音PCM的二进制数据（16k、16bit、单声道）
         """
-        logger.info(f"处理完整语音段，大小={len(speech_data)} 字节")
-        
-        # 1. 进行语音识别
-        recognized_text = await self.speech_to_text(speech_data)
-        if recognized_text:
-            logger.info(f"语音识别结果: {recognized_text}")
-            # 跟大语言模型对话
-            response = await self.chat_with_model(recognized_text)
-            logger.info(f"大语言模型回复: {response}")
+        # 如果已经在处理语音，则跳过
+        if self.processing_lock.locked():
+            logger.warning("正在处理其他语音，跳过当前语音")
+            return
             
-            # 只有当response有内容时才进行语音播放
-            if response and response.strip():
-                try:
-                    # 创建临时文件用于保存音频
-                    with tempfile.NamedTemporaryFile(suffix='.mp3', delete=False) as temp_audio:
-                        temp_audio_path = temp_audio.name
+        async with self.processing_lock:  # 获取锁
+            logger.info(f"处理完整语音段，大小={len(speech_data)} 字节")
+            
+            # 检查是否有任何可用的连接（UDP或WebSocket）
+            has_udp = self.udp_server and self.udp_server.sessions
+            has_ws = self.ws_manager and self.ws_manager.active_connections
+            
+            if not (has_udp or has_ws):
+                logger.warning("没有活跃的UDP或WebSocket会话，跳过音频处理")
+                return
+            
+            # 1. 进行语音识别
+            recognized_text = await self.speech_to_text(speech_data)
+            if recognized_text:
+                logger.info(f"语音识别结果: {recognized_text}")
+                
+                # 发送语音识别结果
+                stt_msg = {
+                    "type": "stt",
+                    "text": recognized_text
+                }
+                
+                # 跟大语言模型对话
+                response = await self.chat_with_model(recognized_text)
+                logger.info(f"大语言模型回复: {response}")
+                
+                # 只有当response有内容时才进行语音播放
+                if response and response.strip():
+                    try:
+                        # 准备消息
+                        start_tts_msg = {
+                            "type": "tts",
+                            "state": "start"
+                        }
                         
-                    # 使用edge-tts生成语音
-                    communicate = edge_tts.Communicate(response, "zh-CN-XiaoxiaoNeural")
-                    await communicate.save(temp_audio_path)
-                    
-                    # 使用ffmpeg将mp3转换为wav格式（因为sounddevice更好地支持wav）
-                    wav_path = temp_audio_path.replace('.mp3', '.wav')
-                    os.system(f'ffmpeg -i {temp_audio_path} -acodec pcm_s16le -ar 16000 -ac 1 {wav_path} -y')
-                    
-                    # 读取wav文件并播放
-                    with wave.open(wav_path, 'rb') as wav_file:
-                        audio_data = wav_file.readframes(wav_file.getnframes())
-                        audio_array = np.frombuffer(audio_data, dtype=np.int16)
-                        sd.play(audio_array, samplerate=16000)
-                        sd.wait()  # 等待播放完成
-                    
-                    # 清理临时文件
-                    os.unlink(temp_audio_path)
-                    os.unlink(wav_path)
-                    
-                    logger.info("TTS播放完成")
-                except Exception as e:
-                    logger.error(f"TTS播放出错: {str(e)}")
-                    logger.error(traceback.format_exc())
+                        sentence_start_msg = {
+                            "type": "tts",
+                            "state": "sentence_start",
+                            "text": response
+                        }
+                        
+                        stop_tts_msg = {
+                            "type": "tts",
+                            "state": "stop"
+                        }
+                        
+                        # 为UDP会话发送消息
+                        if has_udp:
+                            for session in self.udp_server.sessions.values():
+                                device_id = session["device_id"]
+                                topic = f"esp32/device/{device_id}/out"
+                                
+                                # 通过MQTT发送消息
+                                await mqtt_handler.publish(topic, json.dumps(stt_msg), qos=2)
+                                await mqtt_handler.publish(topic, json.dumps(start_tts_msg), qos=2)
+                                await mqtt_handler.publish(topic, json.dumps(sentence_start_msg), qos=2)
+                        
+                        # 为WebSocket会话发送消息
+                        if has_ws:
+                            for device_id in self.ws_manager.active_connections:
+                                # 通过WebSocket发送消息
+                                await self.ws_manager.send_message(device_id, stt_msg)
+                                await self.ws_manager.send_message(device_id, start_tts_msg)
+                                await self.ws_manager.send_message(device_id, sentence_start_msg)
+                        
+                        # 创建临时文件用于保存音频
+                        try:
+                            with tempfile.NamedTemporaryFile(suffix='.mp3', delete=False) as temp_audio:
+                                temp_audio_path = temp_audio.name
+                            
+                            # 使用edge-tts生成语音
+                            try:
+                                communicate = edge_tts.Communicate(response, "zh-CN-XiaoxiaoNeural")
+                                await communicate.save(temp_audio_path)
+                            except Exception as e:
+                                error_msg = f"TTS生成失败: {str(e)}"
+                                logger.error(error_msg)
+                                # 发送错误通知
+                                error_tts_msg = {
+                                    "type": "tts",
+                                    "state": "stop",
+                                    "error": error_msg
+                                }
+                                await self._send_message_to_all_clients(error_tts_msg)
+                                return
+                            
+                            # 使用ffmpeg将mp3转换为wav格式
+                            wav_path = temp_audio_path.replace('.mp3', '.wav')
+                            try:
+                                ffmpeg_result = os.system(f'ffmpeg -i {temp_audio_path} -acodec pcm_s16le -ar 16000 -ac 1 {wav_path} -y')
+                                if ffmpeg_result != 0:
+                                    raise Exception(f"FFmpeg转换失败，返回码: {ffmpeg_result}")
+                            except Exception as e:
+                                error_msg = f"音频格式转换失败: {str(e)}"
+                                logger.error(error_msg)
+                                await self._send_message_to_all_clients({
+                                    "type": "tts",
+                                    "state": "stop",
+                                    "error": error_msg
+                                })
+                                # 清理临时文件
+                                self._cleanup_temp_files(temp_audio_path)
+                                return
+                            
+                            # 读取wav文件并转换为PCM数据
+                            try:
+                                with wave.open(wav_path, 'rb') as wav_file:
+                                    audio_duration = wav_file.getnframes() / wav_file.getframerate()
+                                    audio_data = wav_file.readframes(wav_file.getnframes())
+                                
+                                    # 将PCM数据分成多个块进行编码
+                                    chunk_size = 1920  # 每个块60ms的数据
+                                    
+                                    # 先编码所有数据
+                                    for i in range(0, len(audio_data), chunk_size):
+                                        chunk = audio_data[i:i + chunk_size]
+                                        if len(chunk) == chunk_size:  # 只处理完整的块
+                                            try:
+                                                # 使用Opus编码PCM数据
+                                                encoded_chunk = self.encoder.encode(chunk, self.frame_size)
+                                                for device_id in self.ws_manager.active_connections:
+                                                    await self.ws_manager.send_audio(device_id, encoded_chunk)
+                                            except Exception as e:
+                                                error_msg = f"音频编码或发送失败: {str(e)}"
+                                                logger.error(error_msg)
+                                                await self._send_message_to_all_clients({
+                                                    "type": "tts",
+                                                    "state": "error",
+                                                    "error": error_msg
+                                                })
+                                                break
+                                
+                                # 根据音频时长设置延迟时间（音频时长 + 1秒的缓冲）
+                                delay_time = audio_duration + 1
+                                logger.info(f"音频时长: {audio_duration:.2f}秒，设置延迟时间: {delay_time:.2f}秒")
+                                await asyncio.sleep(delay_time)
+                                
+                            except Exception as e:
+                                error_msg = f"音频处理失败: {str(e)}"
+                                logger.error(error_msg)
+                                await self._send_message_to_all_clients({
+                                    "type": "tts",
+                                    "state": "stop",
+                                    "error": error_msg
+                                })
+                            finally:
+                                # 清理临时文件
+                                self._cleanup_temp_files(temp_audio_path, wav_path)
+                            
+                            # 发送TTS结束通知
+                            stop_tts_msg = {
+                                "type": "tts",
+                                "state": "stop"
+                            }
+                            await self._send_message_to_all_clients(stop_tts_msg)
+                            logger.info("TTS播放完成")
+                            
+                        except Exception as e:
+                            error_msg = f"TTS处理过程出错: {str(e)}"
+                            logger.error(error_msg)
+                            logger.error(traceback.format_exc())
+                            await self._send_message_to_all_clients({
+                                "type": "tts",
+                                "state": "stop",
+                                "error": error_msg
+                            })
+                    except Exception as e:
+                        logger.error(f"TTS播放出错: {str(e)}")
+                        logger.error(traceback.format_exc())
+                else:
+                    logger.warning("AI回复为空，跳过语音播放")
             else:
-                logger.warning("AI回复为空，跳过语音播放")
-        else:
-            logger.warning("未能识别出有效文本")
+                logger.warning("未能识别出有效文本")
 
     def process_with_vad(self, audio_data: bytes):
         """使用VAD处理音频数据，并放入播放缓冲区（如有需要）"""
@@ -547,6 +704,8 @@ class AudioPlayer:
             
             # 使用VAD处理音频(60ms)
             self.process_with_vad(pcm_data)
+
+
             
         except Exception as e:
             logger.error(f"Error playing audio: {str(e)}")
@@ -596,3 +755,30 @@ class AudioPlayer:
             logger.error(error_msg)
             logger.error(traceback.format_exc())
             return "抱歉，我现在无法正常回答，请稍后再试。"
+
+    async def _send_message_to_all_clients(self, message: dict):
+        """发送消息给所有已连接的客户端"""
+        try:
+            # 发送到UDP客户端
+            if self.udp_server and self.udp_server.sessions:
+                for session in self.udp_server.sessions.values():
+                    device_id = session["device_id"]
+                    topic = f"esp32/device/{device_id}/out"
+                    await mqtt_handler.publish(topic, json.dumps(message), qos=2)
+            
+            # 发送到WebSocket客户端
+            if self.ws_manager and self.ws_manager.active_connections:
+                for device_id in self.ws_manager.active_connections:
+                    await self.ws_manager.send_message(device_id, message)
+        except Exception as e:
+            logger.error(f"发送消息到客户端失败: {str(e)}")
+    
+    def _cleanup_temp_files(self, *file_paths):
+        """清理临时文件"""
+        for file_path in file_paths:
+            try:
+                if file_path and os.path.exists(file_path):
+                    os.unlink(file_path)
+                    logger.debug(f"已删除临时文件: {file_path}")
+            except Exception as e:
+                logger.error(f"删除临时文件失败 {file_path}: {str(e)}")

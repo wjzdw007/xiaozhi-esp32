@@ -221,6 +221,7 @@ void Application::Start() {
     auto codec = board.GetAudioCodec();
     opus_decode_sample_rate_ = codec->output_sample_rate();
     opus_decoder_ = std::make_unique<OpusDecoderWrapper>(opus_decode_sample_rate_, 1);
+    // 打印
     opus_encoder_ = std::make_unique<OpusEncoderWrapper>(16000, 1, OPUS_FRAME_DURATION_MS);
     if (codec->input_sample_rate() != 16000) {
         input_resampler_.Configure(codec->input_sample_rate(), 16000);
@@ -329,6 +330,7 @@ void Application::Start() {
     protocol_->OnIncomingAudio([this](std::vector<uint8_t>&& data) {
         std::lock_guard<std::mutex> lock(mutex_);
         if (device_state_ == kDeviceStateSpeaking) {
+            ESP_LOGI(TAG, "########## Received audio data size: %zu bytes", data.size());
             audio_decode_queue_.emplace_back(std::move(data));
         }
     });
@@ -355,6 +357,8 @@ void Application::Start() {
     protocol_->OnIncomingJson([this, display](const cJSON* root) {
         // Parse JSON data
         auto type = cJSON_GetObjectItem(root, "type");
+        // 打印JSON数据，设备状态
+        ESP_LOGI(TAG, "########## Received JSON data: %s, device state: %d", cJSON_Print(root), device_state_);
         if (strcmp(type->valuestring, "tts") == 0) {
             auto state = cJSON_GetObjectItem(root, "state");
             if (strcmp(state->valuestring, "start") == 0) {
@@ -478,11 +482,13 @@ void Application::OutputAudio() {
 
     background_task_->Schedule([this, codec, opus = std::move(opus)]() mutable {
         if (aborted_) {
+            ESP_LOGI(TAG, "########## Aborted");
             return;
         }
 
         std::vector<int16_t> pcm;
         if (!opus_decoder_->Decode(std::move(opus), pcm)) {
+            ESP_LOGI(TAG, "########## Decode failed");
             return;
         }
 
